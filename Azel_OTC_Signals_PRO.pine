@@ -1,0 +1,99 @@
+//@version=6
+indicator("Azel OTC Signals PRO", overlay=true, max_labels_count=300)
+
+// IMPORTANT:
+// Signals are confirmed at candle close. They are not predictions before the candle opens.
+// Use on a 1-minute chart and only where the chart feed matches the instrument you trade.
+
+secret = input.string("CHANGE_THIS_SECRET", "Webhook secret")
+pivotLen = input.int(5, "Support/Resistance pivot length", minval=2, maxval=20)
+emaFastLen = input.int(20, "Trend EMA fast", minval=1)
+emaSlowLen = input.int(50, "Trend EMA slow", minval=2)
+rsiLen = input.int(14, "RSI length", minval=2)
+rsiBuyMin = input.float(51, "Minimum RSI for CALL", minval=1, maxval=99)
+rsiSellMax = input.float(49, "Maximum RSI for PUT", minval=1, maxval=99)
+retestBars = input.int(5, "Retest window (bars)", minval=1, maxval=20)
+atrLen = input.int(14, "ATR length", minval=1)
+zoneAtr = input.float(0.20, "Zone tolerance (ATR)", minval=0.01, step=0.01)
+showLevels = input.bool(true, "Show support/resistance")
+
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+rsiValue = ta.rsi(close, rsiLen)
+atrValue = ta.atr(atrLen)
+
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float resistance = na
+var float support = na
+if not na(ph)
+    resistance := ph
+if not na(pl)
+    support := pl
+
+plot(showLevels ? resistance : na, "Resistance", color=color.new(color.red, 10), linewidth=2, style=plot.style_linebr)
+plot(showLevels ? support : na, "Support", color=color.new(color.lime, 10), linewidth=2, style=plot.style_linebr)
+
+// Engulfing candles
+bullEngulf = close > open and close[1] < open[1] and close >= open[1] and open <= close[1]
+bearEngulf = close < open and close[1] > open[1] and close <= open[1] and open >= close[1]
+
+// Support/resistance reaction zones
+nearSupport = not na(support) and low <= support + atrValue * zoneAtr and close > support
+nearResistance = not na(resistance) and high >= resistance - atrValue * zoneAtr and close < resistance
+
+// Breakout then retest tracking
+breakUp = not na(resistance) and ta.crossover(close, resistance)
+breakDown = not na(support) and ta.crossunder(close, support)
+
+var int upBreakBar = na
+var int downBreakBar = na
+var float brokenResistance = na
+var float brokenSupport = na
+
+if breakUp
+    upBreakBar := bar_index
+    brokenResistance := resistance
+if breakDown
+    downBreakBar := bar_index
+    brokenSupport := support
+
+upRetest = not na(upBreakBar) and bar_index > upBreakBar and bar_index - upBreakBar <= retestBars and low <= brokenResistance + atrValue * zoneAtr and close > brokenResistance and close > open
+downRetest = not na(downBreakBar) and bar_index > downBreakBar and bar_index - downBreakBar <= retestBars and high >= brokenSupport - atrValue * zoneAtr and close < brokenSupport and close < open
+
+if not na(upBreakBar) and bar_index - upBreakBar > retestBars
+    upBreakBar := na
+if not na(downBreakBar) and bar_index - downBreakBar > retestBars
+    downBreakBar := na
+
+trendUp = emaFast > emaSlow
+trendDown = emaFast < emaSlow
+buyFilter = trendUp and rsiValue >= rsiBuyMin
+sellFilter = trendDown and rsiValue <= rsiSellMax
+
+buySignal = barstate.isconfirmed and buyFilter and ((bullEngulf and nearSupport) or upRetest)
+sellSignal = barstate.isconfirmed and sellFilter and ((bearEngulf and nearResistance) or downRetest)
+
+// Prevent repeated same-direction alerts on consecutive bars
+var int lastSignalBar = na
+canSignal = na(lastSignalBar) or bar_index > lastSignalBar
+
+if buySignal and canSignal
+    lastSignalBar := bar_index
+    label.new(bar_index, low, "CALL ↑", style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white)
+    msg = '{"secret":"' + secret + '","side":"CALL","symbol":"' + syminfo.ticker + '","timeframe":"1","price":"' + str.tostring(close, format.mintick) + '","time":"' + str.tostring(time) + '","reason":"Bullish engulfing/support or breakout retest with trend and RSI confirmation"}'
+    alert(msg, alert.freq_once_per_bar_close)
+
+if sellSignal and canSignal
+    lastSignalBar := bar_index
+    label.new(bar_index, high, "PUT ↓", style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white)
+    msg = '{"secret":"' + secret + '","side":"PUT","symbol":"' + syminfo.ticker + '","timeframe":"1","price":"' + str.tostring(close, format.mintick) + '","time":"' + str.tostring(time) + '","reason":"Bearish engulfing/resistance or breakdown retest with trend and RSI confirmation"}'
+    alert(msg, alert.freq_once_per_bar_close)
+
+// Visual reminder when chart isn't 1 minute
+var label tfWarning = na
+if barstate.islast
+    label.delete(tfWarning)
+    if not (timeframe.isminutes and timeframe.multiplier == 1)
+        tfWarning := label.new(bar_index, high, "Azel PRO: switch chart to 1 minute", style=label.style_label_down, color=color.orange, textcolor=color.black)
